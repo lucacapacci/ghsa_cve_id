@@ -1,0 +1,83 @@
+name: GHSA CVE Sync
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch and Process
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          cleanup() {
+            rm -rf temp_data files_to_download.txt changed_files.tmp
+          }
+          trap cleanup EXIT
+
+          REPO_FULL="github/advisory-database"
+          LAST_TIMESTAMP=$(cat last_sync_timestamp.txt 2>/dev/null || date -u -d "1 hour ago" +"%Y-%m-%dT%H:%M:%SZ")
+          NEW_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          : > changed_files.tmp
+          PAGE=1
+          while true; do
+            COMMITS_JSON=$(curl -sf -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/$REPO_FULL/commits?since=$LAST_TIMESTAMP&per_page=100&page=$PAGE")
+
+            SHAS=$(echo "$COMMITS_JSON" | jq -r '.[].sha? // empty')
+            if [ -z "$SHAS" ]; then
+              break
+            fi
+
+            for SHA in $SHAS; do
+              curl -sf -H "Authorization: token $GH_TOKEN" \
+                "https://api.github.com/repos/$REPO_FULL/commits/$SHA" | \
+                jq -r '.files[]? | select(.status != "removed" and (.filename | endswith(".json"))) | .filename' \
+                >> changed_files.tmp
+            done
+
+            PAGE=$((PAGE + 1))
+          done
+
+          sort -u changed_files.tmp > files_to_download.txt
+
+          if [ -s files_to_download.txt ]; then
+            mkdir -p temp_data
+            while IFS= read -r filepath; do
+              [ -z "$filepath" ] && continue
+              safe_name=$(printf '%s' "$filepath" | tr '/' '_')
+              curl -sfL -H "Authorization: token $GH_TOKEN" \
+                -H "Accept: application/vnd.github.v3.raw" \
+                "https://api.github.com/repos/$REPO_FULL/contents/$filepath" \
+                -o "temp_data/$safe_name" || true
+            done < files_to_download.txt
+
+            python3 sync_advisories.py temp_data
+          else
+            echo "No new changes found."
+          fi
+
+          echo "$NEW_TIMESTAMP" > last_sync_timestamp.txt
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Sync: Updated GHSA advisories via paginated commits"
+            git pull --rebase --autostash origin HEAD
+            git push
+          else
+            echo "No changes to commit"
+          fi
