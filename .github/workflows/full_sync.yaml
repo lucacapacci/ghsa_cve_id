@@ -1,0 +1,45 @@
+name: Full Sync
+on:
+  schedule:
+    - cron: '0 0 */2 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  initial-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone Full Advisory DB and Process
+        run: |
+          set -euo pipefail
+
+          cleanup() {
+            rm -rf temp_data
+          }
+          trap cleanup EXIT
+
+          NEW_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          git clone --depth 1 https://github.com/github/advisory-database.git temp_data
+
+          python3 sync_advisories.py temp_data/advisories
+
+          rm -rf temp_data
+
+          echo "$NEW_TIMESTAMP" > last_sync_timestamp.txt
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Initial sync: Full GHSA advisory import"
+            git push
+          else
+            echo "No changes to commit"
+          fi
