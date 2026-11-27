@@ -21,6 +21,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          rm -rf temp_data files_to_download.txt changed_files.tmp
           cleanup() {
             rm -rf temp_data files_to_download.txt changed_files.tmp
           }
@@ -73,7 +74,8 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git reset -q HEAD -- temp_data || true
+          git add -A -- ':!temp_data' ':!files_to_download.txt' ':!changed_files.tmp'
           if ! git diff --cached --quiet; then
             git commit -m "Sync: Updated GHSA advisories via paginated commits"
             git pull --rebase --autostash origin HEAD
